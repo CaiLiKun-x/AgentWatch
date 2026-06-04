@@ -46,5 +46,5 @@ See [README.md](README.md) for full instructions.
 
 ## Links
 
-- GitHub: https://github.com/YOUR_NAME/agentwatch
+- GitHub: https://github.com/dongxutang918-afk/agentwatch
 - License: MIT
