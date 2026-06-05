@@ -236,13 +236,26 @@ open build/AgentWatch.app     # 运行在菜单栏，无 Dock 图标
 - Windows 10 / 11
 - Python 3.10+
 - Claude Code（CLI 或 VS Code 插件）
-- iPhone 安装 [Bark](https://apps.apple.com/app/bark/id1403753865)
+- 手机安装 [Bark](https://apps.apple.com/app/bark/id1403753865)（iOS / Android 均支持）
 
 ### 安装
 
+**推荐方式（下载即用）：**
+
+1. 下载 [AgentWatch-Windows-x64.zip](https://github.com/dongxutang918-afk/agentwatch/releases/download/v0.8.0/AgentWatch-Windows-x64.zip)
+2. 解压到任意位置
+3. 双击 `AgentWatchTray.exe`
+4. 如果弹出选择目录，选你的 AgentWatch 项目目录
+5. 右键托盘图标 → **Setup Python Environment**（一键安装环境）
+6. 右键托盘图标 → **Add / Update Bark Key...** → 粘贴 Bark key
+7. 右键托盘图标 → **Install / Update Claude Code Hooks**（一键安装 hooks）
+
+搞定。托盘 App 显示状态，hooks 在后台独立运行。
+
+**手动安装（CLI）：**
+
 ```powershell
 # Clone 项目
-cd %USERPROFILE%\Projects
 git clone https://github.com/dongxutang918-afk/agentwatch.git
 cd agentwatch
 
@@ -253,22 +266,20 @@ powershell -ExecutionPolicy Bypass -File windows\setup_windows.ps1
 .\.venv\Scripts\agentwatch.exe config bark
 .\.venv\Scripts\agentwatch.exe config test
 
-# 安装 Claude Code hooks（手动，一次性）
+# 安装 hooks（或使用托盘菜单里的 "Install / Update Claude Code Hooks"）
 powershell -ExecutionPolicy Bypass -File windows\install_claude_hooks_windows.ps1
 
 # 验证
 .\.venv\Scripts\agentwatch.exe doctor
 ```
 
-### 可选：构建 Windows 托盘 App
+### 可选：从源码构建
 
 ```powershell
-# 需要 .NET 8 SDK（https://dotnet.microsoft.com）
+# 需要 .NET 8 SDK
 powershell -ExecutionPolicy Bypass -File windows\build_app.ps1
 build\windows\AgentWatchTray\AgentWatchTray.exe
 ```
-
-也可以双击 `Open AgentWatch Windows App.bat`。
 
 ---
 
@@ -447,6 +458,8 @@ build\windows\AgentWatchTray\AgentWatchTray.exe
 ### 功能
 
 与 macOS 菜单栏 App 保持一致，额外增加：
+- **Setup Python Environment** — 一键安装 Python 虚拟环境
+- **Install / Update Claude Code Hooks** — 一键安装 hooks（带确认提示）
 - **Preview Current Persona** — 预览当前主题通知文案，不发送推送
 - **Test Permission Request / Denied** — 模拟特定 Hook 事件
 

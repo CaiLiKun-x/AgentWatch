@@ -231,34 +231,47 @@ Double-click alternatives (no terminal needed):
 - Windows 10/11
 - Python 3.10+
 - Claude Code (CLI or VS Code extension)
-- iPhone / Android phone with [Bark](https://apps.apple.com/app/bark/id1403753865) installed
+- Phone with [Bark](https://apps.apple.com/app/bark/id1403753865) installed (iOS/Android)
 
 ### Install
 
+**Recommended (download + run):**
+
+1. Download [AgentWatch-Windows-x64.zip](https://github.com/dongxutang918-afk/agentwatch/releases/download/v0.8.0/AgentWatch-Windows-x64.zip)
+2. Unzip anywhere
+3. Double-click `AgentWatchTray.exe`
+4. If asked, select your AgentWatch project directory (e.g. `C:\Users\dongx\agentwatch`)
+5. Right-click the tray icon → **Setup Python Environment** (one-click)
+6. Right-click the tray icon → **Add / Update Bark Key...** → paste your Bark key
+7. Right-click the tray icon → **Install / Update Claude Code Hooks** (one-click)
+
+Done. The tray app shows status, and hooks work independently in the background.
+
+**Manual Setup (CLI):**
+
 ```powershell
 # Clone
-cd %USERPROFILE%\Projects
 git clone https://github.com/dongxutang918-afk/agentwatch.git
 cd agentwatch
 
-# Setup Python environment
+# Setup
 powershell -ExecutionPolicy Bypass -File windows\setup_windows.ps1
 
-# Configure Bark key
+# Configure
 .\.venv\Scripts\agentwatch.exe config bark
 .\.venv\Scripts\agentwatch.exe config test
 
-# Install Claude Code hooks (manual, one-time)
+# Hooks (or use tray menu: "Install / Update Claude Code Hooks")
 powershell -ExecutionPolicy Bypass -File windows\install_claude_hooks_windows.ps1
 
 # Verify
 .\.venv\Scripts\agentwatch.exe doctor
 ```
 
-### Optional: Build Windows Tray App
+### Optional: Build from Source
 
 ```powershell
-# Requires .NET 8 SDK (https://dotnet.microsoft.com)
+# Requires .NET 8 SDK
 powershell -ExecutionPolicy Bypass -File windows\build_app.ps1
 build\windows\AgentWatchTray\AgentWatchTray.exe
 ```
@@ -442,6 +455,8 @@ build\windows\AgentWatchTray\AgentWatchTray.exe
 ### Features
 
 Same as macOS menu bar app, plus:
+- **Setup Python Environment** — one-click .venv setup
+- **Install / Update Claude Code Hooks** — one-click hooks installation (with confirmation)
 - **Preview Current Persona** — see what your notifications will look like without sending a push
 - **Test Permission Request / Denied** — simulate specific hook events
 

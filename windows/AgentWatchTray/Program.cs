@@ -166,13 +166,21 @@ static class Cli
             if (!_venvWarned)
             {
                 _venvWarned = true;
-                MessageBox.Show(
+                var choice = MessageBox.Show(
                     "AgentWatch virtual environment not found.\n\n" +
                     $"Expected: {VenvPython}\n\n" +
-                    "Run this command in PowerShell to set it up:\n\n" +
-                    $"  powershell -ExecutionPolicy Bypass -File \"{Path.Combine(ProjectPath, "windows", "setup_windows.ps1")}\"",
+                    "Click 'Yes' to automatically set up the Python environment now.\n" +
+                    "Click 'No' to skip (you can set it up later from the menu).",
                     "Virtual Environment Missing",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (choice == DialogResult.Yes)
+                {
+                    var setupScript = Path.Combine(ProjectPath, "windows", "setup_windows.ps1");
+                    var psi = new ProcessStartInfo("powershell.exe",
+                        $"-NoExit -ExecutionPolicy Bypass -File \"{setupScript}\"")
+                    { WorkingDirectory = ProjectPath, UseShellExecute = true };
+                    Process.Start(psi);
+                }
             }
             return ("", "venv not found", -1);
         }
@@ -606,6 +614,10 @@ sealed class TrayApp : ApplicationContext
 
         menu.Items.Add(ActionItem("Preview Current Persona", (_, _) => PreviewPersona()));
 
+        menu.Items.Add(ActionItem("Setup Python Environment", (_, _) => RunSetup()));
+        menu.Items.Add(ActionItem("Install / Update Claude Code Hooks", (_, _) => RunHooksInstall()));
+        menu.Items.Add(new ToolStripSeparator());
+
         menu.Items.Add(ActionItem("Open Monitor in PowerShell", (_, _) => OpenMonitor()));
         menu.Items.Add(ActionItem("Open Logs Folder", (_, _) => OpenFolder("logs")));
         menu.Items.Add(ActionItem("Open config.json", (_, _) => OpenFile("config.json")));
@@ -830,6 +842,50 @@ sealed class TrayApp : ApplicationContext
             failMsg: "Auto exec test failed -- check logs.");
     }
 
+    // ── Setup helpers ────────────────────────────────────────────────────
+
+    private void RunSetup()
+    {
+        var script = Path.Combine(_projectPath, "windows", "setup_windows.ps1");
+        if (!File.Exists(script))
+        {
+            MessageBox.Show($"Setup script not found: {script}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        var psi = new ProcessStartInfo("powershell.exe",
+            $"-NoExit -ExecutionPolicy Bypass -File \"{script}\"")
+        { WorkingDirectory = _projectPath, UseShellExecute = true };
+        Process.Start(psi);
+        _lastResult = "Setup script launched in PowerShell.";
+        RebuildMenu();
+    }
+
+    private void RunHooksInstall()
+    {
+        var script = Path.Combine(_projectPath, "windows", "install_claude_hooks_windows.ps1");
+        if (!File.Exists(script))
+        {
+            MessageBox.Show($"Hooks install script not found: {script}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        // Confirm before modifying Claude Code settings.
+        var choice = MessageBox.Show(
+            "This will install AgentWatch hooks into your Claude Code settings.\n\n" +
+            "A backup of settings.json will be created before any changes.\n\n" +
+            "Continue?",
+            "Install Claude Code Hooks", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (choice != DialogResult.Yes) return;
+
+        var psi = new ProcessStartInfo("powershell.exe",
+            $"-NoExit -ExecutionPolicy Bypass -File \"{script}\"")
+        { WorkingDirectory = _projectPath, UseShellExecute = true };
+        Process.Start(psi);
+        _lastResult = "Hooks installation launched in PowerShell.";
+        RebuildMenu();
+    }
+
     // ── Open / launch ─────────────────────────────────────────────────────
 
     private void OpenMonitor()
@@ -871,15 +927,20 @@ sealed class TrayApp : ApplicationContext
 
     private void CopySetupCommands()
     {
-        var setupScript = Path.Combine(_projectPath, "windows", "setup_windows.ps1");
         var cmds = string.Join("\r\n",
-            $"cd /d \"{_projectPath}\"",
-            "python -m venv .venv",
-            ".venv\\Scripts\\python.exe -m pip install -e .",
-            ".venv\\Scripts\\agentwatch.exe init",
+            ":: Step 1 — Install AgentWatch",
+            "git clone https://github.com/dongxutang918-afk/agentwatch.git",
+            "cd agentwatch",
+            "",
+            ":: Step 2 — Setup Python environment (or click 'Setup Python Environment' in the tray menu)",
+            "powershell -ExecutionPolicy Bypass -File windows\\setup_windows.ps1",
+            "",
+            ":: Step 3 — Configure Bark key (or click 'Add / Update Bark Key' in the tray menu)",
             ".venv\\Scripts\\agentwatch.exe config bark",
             ".venv\\Scripts\\agentwatch.exe config test",
-            $"powershell -ExecutionPolicy Bypass -File \"{setupScript}\"");
+            "",
+            ":: Step 4 — Install hooks (or click 'Install / Update Claude Code Hooks' in the tray menu)",
+            "powershell -ExecutionPolicy Bypass -File windows\\install_claude_hooks_windows.ps1");
         Clipboard.SetText(cmds);
         _lastResult = "Setup commands copied to clipboard.";
         RebuildMenu();
