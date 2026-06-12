@@ -857,17 +857,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openLogsFolder() {
         guard ensureProjectPath(interactive: true) else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: "\(kProjectPath)/logs"))
+        openPath("\(kProjectPath)/logs", kind: localized("Logs folder", "日志文件夹"))
     }
 
     @objc private func openReadme() {
         guard ensureProjectPath(interactive: true) else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: "\(kProjectPath)/README.md"))
+        openPath("\(kProjectPath)/README.md", kind: "README")
     }
 
     @objc private func openConfig() {
         guard ensureProjectPath(interactive: true) else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: kConfigPath))
+        openPath(kConfigPath, kind: "config.json")
     }
 
     @objc private func copySetupCommands() {
@@ -954,6 +954,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: localized("OK", "确定"))
         alert.runModal()
+    }
+
+    private func showWarningDialog(_ title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: localized("OK", "确定"))
+        alert.runModal()
+    }
+
+    private func openPath(_ path: String, kind: String) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else {
+            showWarningDialog(
+                localized("Cannot Open", "无法打开"),
+                message: localized("\(kind) does not exist:\n\(path)", "\(kind) 不存在：\n\(path)")
+            )
+            refreshUI(with: localized("Open failed: missing file.", "打开失败：文件不存在。"))
+            return
+        }
+
+        let url = URL(fileURLWithPath: path)
+        if NSWorkspace.shared.open(url) {
+            refreshUI(with: localized("Opened \(kind).", "已打开 \(kind)。"))
+            return
+        }
+
+        let result = runCommand(
+            executable: "/usr/bin/open",
+            arguments: [path],
+            workingDir: "/",
+            timeoutSec: 5.0
+        )
+        if result?.exitCode == 0 {
+            refreshUI(with: localized("Opened \(kind).", "已打开 \(kind)。"))
+            return
+        }
+
+        let detail = result?.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? localized("Unknown error", "未知错误")
+        showWarningDialog(
+            localized("Cannot Open", "无法打开"),
+            message: "\(kind):\n\(path)\n\n\(detail)"
+        )
+        refreshUI(with: localized("Open failed.", "打开失败。"))
     }
 
     private func confirmHookInstall(title: String, message: String) -> Bool {
