@@ -4,39 +4,118 @@ import Foundation
 // ──────────────────────────────────────────────────────────────────────────────
 // Configuration
 // ──────────────────────────────────────────────────────────────────────────────
+let kProjectPathDefaultsKey = "AgentWatchProjectPath"
+
+func isProjectRoot(_ path: String) -> Bool {
+    let fm = FileManager.default
+    return fm.fileExists(atPath: "\(path)/pyproject.toml")
+        && fm.fileExists(atPath: "\(path)/agentwatch/cli.py")
+}
+
+func saveProjectPath(_ path: String) {
+    UserDefaults.standard.set(path, forKey: kProjectPathDefaultsKey)
+}
+
 func findProjectPath() -> String {
     let fm = FileManager.default
 
     if let envPath = ProcessInfo.processInfo.environment["AGENTWATCH_HOME"],
-       fm.fileExists(atPath: "\(envPath)/pyproject.toml") {
+       isProjectRoot(envPath) {
         return envPath
+    }
+
+    if let savedPath = UserDefaults.standard.string(forKey: kProjectPathDefaultsKey),
+       isProjectRoot(savedPath) {
+        return savedPath
     }
 
     var url = Bundle.main.bundleURL
     for _ in 0..<8 {
         let candidate = url.path
-        if fm.fileExists(atPath: "\(candidate)/pyproject.toml") {
+        if isProjectRoot(candidate) {
             return candidate
         }
         url.deleteLastPathComponent()
     }
 
     let cwd = fm.currentDirectoryPath
-    if fm.fileExists(atPath: "\(cwd)/pyproject.toml") {
+    if isProjectRoot(cwd) {
         return cwd
+    }
+
+    let home = NSHomeDirectory()
+    let candidates = [
+        "\(home)/Projects/agentwatch",
+        "\(home)/Projects/AgentWatch",
+        "\(home)/Documents/WorkSpace/agentwatch",
+        "\(home)/Documents/WorkSpace/AgentWatch",
+        "\(home)/Documents/Workspace/agentwatch",
+        "\(home)/Documents/Workspace/AgentWatch",
+        "\(home)/agentwatch",
+        "\(home)/AgentWatch",
+    ]
+    for candidate in candidates where isProjectRoot(candidate) {
+        saveProjectPath(candidate)
+        return candidate
     }
 
     return "\(NSHomeDirectory())/Projects/agentwatch"
 }
 
-let kProjectPath = findProjectPath()
-let kPythonBin    = "\(kProjectPath)/.venv/bin/python"
-let kAgentWatchBin = "\(kProjectPath)/.venv/bin/agentwatch"
-let kConfigPath    = "\(kProjectPath)/config.json"
-let kEventsLog     = "\(kProjectPath)/logs/agentwatch_events.jsonl"
-let kStateFile     = "\(kProjectPath)/logs/state.json"
+var kProjectPath = findProjectPath()
+var kPythonBin: String { "\(kProjectPath)/.venv/bin/python" }
+var kAgentWatchBin: String { "\(kProjectPath)/.venv/bin/agentwatch" }
+var kConfigPath: String { "\(kProjectPath)/config.json" }
+var kEventsLog: String { "\(kProjectPath)/logs/agentwatch_events.jsonl" }
+var kStateFile: String { "\(kProjectPath)/logs/state.json" }
 let kClaudeSettings = "\(NSHomeDirectory())/.claude/settings.json"
 let kCodexHooks     = "\(NSHomeDirectory())/.codex/hooks.json"
+
+func chooseProjectPath() -> String? {
+    let panel = NSOpenPanel()
+    panel.title = localized("Select AgentWatch Project Folder", "选择 AgentWatch 项目目录")
+    panel.message = localized(
+        "Choose the folder that contains pyproject.toml and the agentwatch directory.",
+        "请选择包含 pyproject.toml 和 agentwatch 目录的项目文件夹。"
+    )
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+
+    guard panel.runModal() == .OK, let url = panel.url else {
+        return nil
+    }
+
+    let path = url.path
+    guard isProjectRoot(path) else {
+        let alert = NSAlert()
+        alert.messageText = localized("Invalid Project Folder", "项目目录无效")
+        alert.informativeText = localized(
+            "The selected folder must contain pyproject.toml and agentwatch/cli.py.",
+            "所选目录必须包含 pyproject.toml 和 agentwatch/cli.py。"
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: localized("OK", "确定"))
+        alert.runModal()
+        return nil
+    }
+
+    saveProjectPath(path)
+    return path
+}
+
+@discardableResult
+func ensureProjectPath(interactive: Bool = false) -> Bool {
+    if isProjectRoot(kProjectPath) {
+        return true
+    }
+    if interactive, let selected = chooseProjectPath() {
+        kProjectPath = selected
+        return true
+    }
+    return false
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -46,14 +125,14 @@ let kCodexHooks     = "\(NSHomeDirectory())/.codex/hooks.json"
 func runCommand(
     executable: String,
     arguments: [String],
-    workingDir: String = kProjectPath,
+    workingDir: String? = nil,
     timeoutSec: Double = 15.0,
     env: [String: String] = [:]
 ) -> (stdout: String, stderr: String, exitCode: Int32)? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
-    process.currentDirectoryURL = URL(fileURLWithPath: workingDir)
+    process.currentDirectoryURL = URL(fileURLWithPath: workingDir ?? kProjectPath)
 
     var fullEnv = ProcessInfo.processInfo.environment
     for (k, v) in env { fullEnv[k] = v }
@@ -136,7 +215,7 @@ func findPython310Plus() -> String? {
 /// Call the agentwatch CLI (prefer .venv, then a Python 3.10+ source checkout).
 func callAgentWatch(_ args: [String], timeoutSec: Double = 15.0) -> (stdout: String, stderr: String, exitCode: Int32)? {
     let fm = FileManager.default
-    if !fm.fileExists(atPath: kProjectPath) {
+    if !ensureProjectPath(interactive: false) || !fm.fileExists(atPath: kProjectPath) {
         return ("", "AgentWatch project folder not found: \(kProjectPath)", 127)
     }
 
@@ -445,6 +524,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .bold)
 
         rebuildMenu()
+        if !ensureProjectPath(interactive: false) {
+            DispatchQueue.main.async { [weak self] in
+                if ensureProjectPath(interactive: true) {
+                    self?.refreshUI(with: localized("Project folder saved.", "项目目录已保存。"))
+                } else {
+                    self?.refreshUI(with: localized("Project folder not selected.", "未选择项目目录。"))
+                }
+            }
+        }
     }
 
     // ── Menu building ────────────────────────────────────────────────────
@@ -527,6 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ── Actions ──
         addAction(menu, localized("Refresh Status", "刷新状态"),               #selector(refreshStatus))
+        addAction(menu, localized("Select Project Folder...", "选择项目目录..."), #selector(selectProjectFolder))
         addAction(menu, localized("Add / Update Bark Key...", "添加 / 更新 Bark Key..."), #selector(updateBarkKey))
         addAction(menu, localized("Show Bark Config", "查看 Bark 配置"),         #selector(showBarkConfig))
         addAction(menu, localized("Test Push", "测试推送"),                    #selector(testPush))
@@ -667,6 +756,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func selectProjectFolder() {
+        if let selected = chooseProjectPath() {
+            kProjectPath = selected
+            refreshUI(with: localized("Project folder saved.", "项目目录已保存。"))
+        }
+    }
+
     @objc private func testPush() {
         lastActionResult = localized("Testing push...", "正在测试推送...")
         rebuildMenu()
@@ -682,6 +778,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func setTaskBoundary() {
+        guard ensureProjectPath(interactive: true) else {
+            refreshUI(with: localized("Project folder is required.", "需要先选择项目目录。"))
+            return
+        }
         // Open Terminal with agentwatch task quick
         let script = """
         cd '\(kProjectPath)' && source .venv/bin/activate && agentwatch task quick
@@ -694,6 +794,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func clearTaskBoundary() {
+        guard ensureProjectPath(interactive: true) else {
+            refreshUI(with: localized("Project folder is required.", "需要先选择项目目录。"))
+            return
+        }
         DispatchQueue.global().async { [weak self] in
             _ = callAgentWatch(["task", "clear"], timeoutSec: 5.0)
             DispatchQueue.main.async {
@@ -703,6 +807,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func installClaudeHooks() {
+        guard ensureProjectPath(interactive: true) else {
+            refreshUI(with: localized("Project folder is required.", "需要先选择项目目录。"))
+            return
+        }
         guard confirmHookInstall(
             title: localized("Install Claude Code Hooks", "安装 Claude Code Hooks"),
             message: localized(
@@ -718,6 +826,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func installCodexHooks() {
+        guard ensureProjectPath(interactive: true) else {
+            refreshUI(with: localized("Project folder is required.", "需要先选择项目目录。"))
+            return
+        }
         guard confirmHookInstall(
             title: localized("Install Codex Hooks", "安装 Codex Hooks"),
             message: localized(
@@ -733,6 +845,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openMonitor() {
+        guard ensureProjectPath(interactive: true) else {
+            refreshUI(with: localized("Project folder is required.", "需要先选择项目目录。"))
+            return
+        }
         let script = """
         cd '\(kProjectPath)' && source .venv/bin/activate && agentwatch monitor
         """
@@ -740,14 +856,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openLogsFolder() {
+        guard ensureProjectPath(interactive: true) else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: "\(kProjectPath)/logs"))
     }
 
     @objc private func openReadme() {
+        guard ensureProjectPath(interactive: true) else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: "\(kProjectPath)/README.md"))
     }
 
     @objc private func openConfig() {
+        guard ensureProjectPath(interactive: true) else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: kConfigPath))
     }
 
@@ -768,6 +887,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func updateBarkKey() {
+        guard ensureProjectPath(interactive: true) else {
+            refreshUI(with: localized("Project folder is required.", "需要先选择项目目录。"))
+            return
+        }
+
         let alert = NSAlert()
         alert.messageText = localized("Configure Bark Key", "配置 Bark Key")
         alert.informativeText = localized(
