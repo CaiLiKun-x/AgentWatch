@@ -270,6 +270,14 @@ static class StatusReader
         return key[..4] + new string('*', Math.Max(0, key.Length - 7)) + key[^3..];
     }
 
+    private static string FormatLocalEventTime(string timestamp)
+    {
+        if (string.IsNullOrWhiteSpace(timestamp)) return "";
+        if (DateTimeOffset.TryParse(timestamp, out var parsed))
+            return parsed.ToLocalTime().ToString("HH:mm:ss");
+        return timestamp.Length >= 19 ? timestamp.Substring(11, 8) : "";
+    }
+
     public static string SourceLabel(string? source) => source switch
     {
         "pending_pretooluse_timeout"      => "pending",
@@ -401,7 +409,7 @@ static class StatusReader
                 var etype = ev["event_type"]?.GetValue<string>() ?? "info";
                 if (etype == "info") continue;
                 var ts = ev["timestamp"]?.GetValue<string>() ?? "";
-                var time = ts.Length >= 19 ? ts.Substring(11, 8) : "";
+                var time = FormatLocalEventTime(ts);
                 var body = ev["body"]?.GetValue<string>() ?? "";
                 var firstLine = body.Split('\n')[0];
                 var wasNotified = ev["notified"] != null && ev["notified"]!.GetValue<bool>();

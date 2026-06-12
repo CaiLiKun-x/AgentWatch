@@ -53,7 +53,7 @@ from agentwatch.store import (
     mark_pending_notified,
     count_pending,
 )
-from agentwatch.utils import read_stdin_json, timestamp_iso, mask_key, parse_bark_input
+from agentwatch.utils import read_stdin_json, timestamp_iso, mask_key, parse_bark_input, format_local_time
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +768,7 @@ def cmd_doctor() -> int:
         last_info = ""
         events = tail_logs(1)
         if events and "timestamp" in events[0]:
-            ts = events[0]["timestamp"][:19].replace("T", " ")
+            ts = format_local_time(events[0]["timestamp"], include_date=True)
             et = events[0].get("event_type", "?")
             last_info = f"  |  Last: {ts} / {et}"
         print(f"  Logs:        {_ansi('green')}OK{_ansi('reset')}{last_info}")
@@ -814,7 +814,7 @@ def cmd_doctor() -> int:
 
 def _fmt_event_row(ev: dict[str, Any]) -> str:
     """Format one log entry as a single-line monitor row."""
-    ts = ev.get("timestamp", "")[:19].replace("T", " ")[-8:]  # HH:MM:SS
+    ts = format_local_time(ev.get("timestamp", ""))
     etype = ev.get("event_type", "?")
     title = ev.get("title", "")
     risk = ev.get("risk", "低")

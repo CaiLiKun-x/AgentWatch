@@ -29,6 +29,21 @@ def timestamp_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def format_local_time(value: str, include_date: bool = False) -> str:
+    """Format an ISO timestamp in the user's local timezone."""
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        fallback = value[:19].replace("T", " ")
+        return fallback if include_date or len(fallback) < 19 else fallback[-8:]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_dt = dt.astimezone()
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S" if include_date else "%H:%M:%S")
+
+
 def flatten_strings(obj: Any, acc: list[str] | None = None) -> list[str]:
     """Recursively collect every string value in a nested dict/list."""
     if acc is None:

@@ -45,8 +45,13 @@ import shlex
 from pathlib import Path
 
 settings_file = Path("$SETTINGS_FILE")
+script_dir = "$SCRIPT_DIR"
 python_bin = "$PYTHON_BIN"
 python_cmd = shlex.quote(python_bin)
+project_cmd = shlex.quote(script_dir)
+
+def hook_command(event_name):
+    return f"cd {project_cmd} && {python_cmd} -m agentwatch.cli hook --event {event_name} --provider codex"
 
 if settings_file.exists():
     try:
@@ -67,7 +72,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"{python_cmd} -m agentwatch.cli hook --event PreToolUse --provider codex",
+                    "command": hook_command("PreToolUse"),
                     "timeout": 15,
                     "statusMessage": "AgentWatch: checking tool use"
                 }
@@ -80,7 +85,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"{python_cmd} -m agentwatch.cli hook --event PostToolUse --provider codex",
+                    "command": hook_command("PostToolUse"),
                     "timeout": 15,
                     "statusMessage": "AgentWatch: recording tool result"
                 }
@@ -92,7 +97,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"{python_cmd} -m agentwatch.cli hook --event Stop --provider codex",
+                    "command": hook_command("Stop"),
                     "timeout": 15,
                     "statusMessage": "AgentWatch: sending completion notification"
                 }
@@ -105,7 +110,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"{python_cmd} -m agentwatch.cli hook --event PermissionRequest --provider codex",
+                    "command": hook_command("PermissionRequest"),
                     "timeout": 15,
                     "statusMessage": "AgentWatch: sending approval notification"
                 }

@@ -56,11 +56,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Build the hook command prefix.
-# ---------------------------------------------------------------------------
-HOOK_PREFIX="$PYTHON_BIN -m agentwatch.cli hook --event"
-
-# ---------------------------------------------------------------------------
 # Determine current hooks (user-level).
 # ---------------------------------------------------------------------------
 echo "[AgentWatch] Reading current hooks ..."
@@ -82,10 +77,18 @@ echo "[AgentWatch] Reading current hooks ..."
 # }
 # ---------------------------------------------------------------------------
 $PYTHON_BIN << PYEOF
-import json, sys
+import json, shlex, sys
 from pathlib import Path
 
 settings_file = Path("$SETTINGS_FILE")
+script_dir = "$SCRIPT_DIR"
+python_bin = "$PYTHON_BIN"
+
+def hook_command(event_name):
+    return (
+        f"cd {shlex.quote(script_dir)} && "
+        f"{shlex.quote(python_bin)} -m agentwatch.cli hook --event {event_name}"
+    )
 
 # Load existing or empty.
 if settings_file.exists():
@@ -108,7 +111,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "$PYTHON_BIN -m agentwatch.cli hook --event PreToolUse",
+                    "command": hook_command("PreToolUse"),
                     "timeout": 15
                 }
             ]
@@ -119,7 +122,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "$PYTHON_BIN -m agentwatch.cli hook --event PostToolUse",
+                    "command": hook_command("PostToolUse"),
                     "timeout": 15
                 }
             ]
@@ -130,7 +133,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "$PYTHON_BIN -m agentwatch.cli hook --event Notification",
+                    "command": hook_command("Notification"),
                     "timeout": 15
                 }
             ]
@@ -141,7 +144,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "$PYTHON_BIN -m agentwatch.cli hook --event Stop",
+                    "command": hook_command("Stop"),
                     "timeout": 15
                 }
             ]
@@ -152,7 +155,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "$PYTHON_BIN -m agentwatch.cli hook --event PermissionRequest",
+                    "command": hook_command("PermissionRequest"),
                     "timeout": 15
                 }
             ]
@@ -163,7 +166,7 @@ aw_hook_groups = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "$PYTHON_BIN -m agentwatch.cli hook --event PermissionDenied",
+                    "command": hook_command("PermissionDenied"),
                     "timeout": 15
                 }
             ]

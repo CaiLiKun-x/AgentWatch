@@ -262,6 +262,26 @@ func readJSON(_ path: String) -> [String: Any]? {
     return obj
 }
 
+func formatLocalEventTime(_ timestamp: String) -> String {
+    let parser = ISO8601DateFormatter()
+    parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let date = parser.date(from: timestamp) ?? {
+        let fallback = ISO8601DateFormatter()
+        fallback.formatOptions = [.withInternetDateTime]
+        return fallback.date(from: timestamp)
+    }()
+
+    guard let date else {
+        return timestamp.count >= 19 ? String(timestamp.prefix(19).suffix(8)) : ""
+    }
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = .current
+    formatter.dateFormat = "HH:mm:ss"
+    return formatter.string(from: date)
+}
+
 func readHookStatus(_ path: String, expectedEvents: [String]) -> (installed: Bool, count: Int) {
     var count = 0
     guard let settings = readJSON(path),
@@ -465,7 +485,7 @@ func readAppStatus() -> AppStatus {
             let etype = ev["event_type"] as? String ?? "info"
             if etype == "info" { continue }
             let ts = ev["timestamp"] as? String ?? ""
-            let time = ts.count >= 19 ? String(ts.prefix(19).suffix(8)) : ""
+            let time = formatLocalEventTime(ts)
             let body = ev["body"] as? String ?? ""
             let firstLine = body.components(separatedBy: "\n").first ?? ""
             let wasNotified = ev["notified"] as? Bool ?? false
