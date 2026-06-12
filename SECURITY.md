@@ -11,11 +11,14 @@
 - `logs/agentwatch_events.jsonl` may contain command summaries, file paths, and hook payloads. **Do not share logs publicly** unless you have reviewed and redacted them.
 - Bark keys are **automatically redacted** from all log output before writing to disk.
 
-## Claude Code Hooks
+## Claude Code / Codex Hooks
 
-- AgentWatch hooks are installed **only when the user manually runs** the install script (`install_claude_hooks.sh` or `install_claude_hooks_windows.ps1`).
+- AgentWatch hooks are installed **only when the user manually runs** an install script:
+  `install_claude_hooks.sh`, `install_codex_hooks.sh`, or the matching Windows PowerShell scripts.
 - The macOS menu bar app, Windows tray app, and all `agentwatch` CLI commands **never auto-install hooks**.
-- The hooks modify `~/.claude/settings.json` (or `%USERPROFILE%\.claude\settings.json` on Windows). A backup is always created before modification.
+- Claude Code hooks modify `~/.claude/settings.json` (or `%USERPROFILE%\.claude\settings.json` on Windows).
+- Codex hooks modify `~/.codex/hooks.json` (or `%USERPROFILE%\.codex\hooks.json` on Windows).
+- A backup is always created before modification.
 
 ## Data Flow
 

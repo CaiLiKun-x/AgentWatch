@@ -2,16 +2,41 @@ import AppKit
 import Foundation
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Configuration — edit these if your project lives elsewhere.
+// Configuration
 // ──────────────────────────────────────────────────────────────────────────────
-let kProjectPath = "\(NSHomeDirectory())/Projects/agentwatch"
+func findProjectPath() -> String {
+    let fm = FileManager.default
+
+    if let envPath = ProcessInfo.processInfo.environment["AGENTWATCH_HOME"],
+       fm.fileExists(atPath: "\(envPath)/pyproject.toml") {
+        return envPath
+    }
+
+    var url = Bundle.main.bundleURL
+    for _ in 0..<8 {
+        let candidate = url.path
+        if fm.fileExists(atPath: "\(candidate)/pyproject.toml") {
+            return candidate
+        }
+        url.deleteLastPathComponent()
+    }
+
+    let cwd = fm.currentDirectoryPath
+    if fm.fileExists(atPath: "\(cwd)/pyproject.toml") {
+        return cwd
+    }
+
+    return "\(NSHomeDirectory())/Projects/agentwatch"
+}
+
+let kProjectPath = findProjectPath()
 let kPythonBin    = "\(kProjectPath)/.venv/bin/python"
 let kAgentWatchBin = "\(kProjectPath)/.venv/bin/agentwatch"
-let kFallbackBin   = "/usr/bin/env agentwatch"
 let kConfigPath    = "\(kProjectPath)/config.json"
 let kEventsLog     = "\(kProjectPath)/logs/agentwatch_events.jsonl"
 let kStateFile     = "\(kProjectPath)/logs/state.json"
 let kClaudeSettings = "\(NSHomeDirectory())/.claude/settings.json"
+let kCodexHooks     = "\(NSHomeDirectory())/.codex/hooks.json"
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -48,7 +73,7 @@ func runCommand(
     do {
         try process.run()
     } catch {
-        return nil
+        return ("", "Failed to run \(executable): \(error.localizedDescription)", 127)
     }
 
     let deadline = DispatchTime.now() + timeoutSec
@@ -72,16 +97,63 @@ func runCommand(
     )
 }
 
-/// Call the agentwatch CLI (prefer .venv, fall back to PATH).
+func isPython310Plus(_ path: String) -> Bool {
+    let result = runCommand(
+        executable: path,
+        arguments: ["-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"],
+        workingDir: kProjectPath,
+        timeoutSec: 3.0
+    )
+    return result?.exitCode == 0
+}
+
+func findPython310Plus() -> String? {
+    let fm = FileManager.default
+    let candidates = [
+        kPythonBin,
+        "/usr/local/bin/python3.14",
+        "/usr/local/bin/python3.13",
+        "/usr/local/bin/python3.12",
+        "/usr/local/bin/python3.11",
+        "/usr/local/bin/python3.10",
+        "/usr/local/bin/python3",
+        "/opt/homebrew/bin/python3.14",
+        "/opt/homebrew/bin/python3.13",
+        "/opt/homebrew/bin/python3.12",
+        "/opt/homebrew/bin/python3.11",
+        "/opt/homebrew/bin/python3.10",
+        "/opt/homebrew/bin/python3"
+    ]
+
+    for candidate in candidates where fm.fileExists(atPath: candidate) {
+        if isPython310Plus(candidate) {
+            return candidate
+        }
+    }
+    return nil
+}
+
+/// Call the agentwatch CLI (prefer .venv, then a Python 3.10+ source checkout).
 func callAgentWatch(_ args: [String], timeoutSec: Double = 15.0) -> (stdout: String, stderr: String, exitCode: Int32)? {
-    let bin = FileManager.default.fileExists(atPath: kAgentWatchBin) ? kAgentWatchBin : kFallbackBin
+    let fm = FileManager.default
+    if !fm.fileExists(atPath: kProjectPath) {
+        return ("", "AgentWatch project folder not found: \(kProjectPath)", 127)
+    }
+
     let executable: String
     let fullArgs: [String]
-    if bin == kAgentWatchBin {
-        executable = bin
+    if fm.fileExists(atPath: kAgentWatchBin),
+       fm.fileExists(atPath: kPythonBin),
+       isPython310Plus(kPythonBin) {
+        executable = kAgentWatchBin
         fullArgs = args
+    } else if fm.fileExists(atPath: "\(kProjectPath)/agentwatch/cli.py") {
+        guard let python = findPython310Plus() else {
+            return ("", "Python 3.10 or newer is required. Install Python 3.10+ or run AgentWatch Setup.command to create .venv.", 127)
+        }
+        executable = python
+        fullArgs = ["-m", "agentwatch.cli"] + args
     } else {
-        // /usr/bin/env agentwatch args...
         executable = "/usr/bin/env"
         fullArgs = ["agentwatch"] + args
     }
@@ -90,7 +162,7 @@ func callAgentWatch(_ args: [String], timeoutSec: Double = 15.0) -> (stdout: Str
 
 /// Mask a string for display: show first 4 + last 3, middle replaced with *.
 func maskKey(_ key: String) -> String {
-    if key.isEmpty || key == "YOUR_BARK_KEY" { return "NOT SET" }
+    if key.isEmpty || key == "YOUR_BARK_KEY" { return localized("NOT SET", "未设置") }
     if key.count <= 7 { return String(repeating: "*", count: key.count) }
     let prefix = key.prefix(4)
     let suffix = key.suffix(3)
@@ -104,6 +176,77 @@ func readJSON(_ path: String) -> [String: Any]? {
           let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return nil }
     return obj
+}
+
+func readHookStatus(_ path: String, expectedEvents: [String]) -> (installed: Bool, count: Int) {
+    var count = 0
+    guard let settings = readJSON(path),
+          let hooks = settings["hooks"] as? [String: Any] else {
+        return (false, 0)
+    }
+
+    for eventName in expectedEvents {
+        guard let groups = hooks[eventName] as? [[String: Any]] else { continue }
+        var foundForEvent = false
+        for group in groups {
+            guard let inner = group["hooks"] as? [[String: Any]] else { continue }
+            for hook in inner {
+                let command = ((hook["command"] as? String) ?? "") + " " + ((hook["commandWindows"] as? String) ?? "")
+                if command.range(of: "agentwatch", options: .caseInsensitive) != nil {
+                    count += 1
+                    foundForEvent = true
+                    break
+                }
+            }
+            if foundForEvent { break }
+        }
+    }
+
+    return (count >= expectedEvents.count, count)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Menu localization
+// ──────────────────────────────────────────────────────────────────────────────
+
+enum AppLanguage: String, CaseIterable {
+    case english = "en"
+    case chinese = "zh-Hans"
+
+    static let defaultsKey = "AgentWatchMenuLanguage"
+
+    static var current: AppLanguage {
+        get {
+            let raw = UserDefaults.standard.string(forKey: defaultsKey) ?? defaultLanguage().rawValue
+            return AppLanguage(rawValue: raw) ?? .english
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
+        }
+    }
+
+    static func defaultLanguage() -> AppLanguage {
+        for language in Locale.preferredLanguages {
+            if language.lowercased().hasPrefix("zh") {
+                return .chinese
+            }
+        }
+        return .english
+    }
+
+    var displayName: String {
+        switch self {
+        case .english: return "English"
+        case .chinese: return "简体中文"
+        }
+    }
+}
+
+func localized(_ english: String, _ chinese: String) -> String {
+    switch AppLanguage.current {
+    case .english: return english
+    case .chinese: return chinese
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -126,13 +269,25 @@ enum OverallStatus: String {
         case .recentRisk:   return "⚠"
         }
     }
+
+    var displayName: String {
+        switch self {
+        case .ready:        return localized("Ready", "就绪")
+        case .needsSetup:   return localized("Needs Setup", "需要设置")
+        case .hooksMissing: return localized("Hooks Missing", "Hooks 缺失")
+        case .noBark:       return localized("No Bark Key", "未配置 Bark Key")
+        case .recentRisk:   return localized("Recent Risk", "最近有风险")
+        }
+    }
 }
 
 struct AppStatus {
     var barkOk: Bool
     var barkDisplay: String        // redacted key
-    var hooksInstalled: Bool
-    var hookCount: Int        // number of agentwatch hooks found
+    var claudeHooksInstalled: Bool
+    var claudeHookCount: Int
+    var codexHooksInstalled: Bool
+    var codexHookCount: Int
     var taskName: String?
     var allowedPaths: [String]
     var forbiddenPaths: [String]
@@ -160,7 +315,7 @@ struct EventSummary: Identifiable {
 func readAppStatus() -> AppStatus {
     // --- Bark ---
     var barkOk = false
-    var barkDisplay = "NOT SET"
+    var barkDisplay = localized("NOT SET", "未设置")
     var configDict: [String: Any]? = nil
     if let config = readJSON(kConfigPath),
        let notifier = config["notifier"] as? [String: Any] {
@@ -191,26 +346,14 @@ func readAppStatus() -> AppStatus {
     }
 
     // --- Hooks (read-only check, never modifies) ---
-    var hooksInstalled = false
-    var hookCount = 0
-    if let settings = readJSON(kClaudeSettings),
-       let hooks = settings["hooks"] as? [String: Any] {
-        let needed = ["PreToolUse", "PostToolUse", "Notification", "Stop", "PermissionRequest", "PermissionDenied"]
-        for eventName in needed {
-            if let groups = hooks[eventName] as? [[String: Any]] {
-                for g in groups {
-                    if let inner = g["hooks"] as? [[String: Any]] {
-                        for h in inner {
-                            if let cmd = h["command"] as? String, cmd.contains("agentwatch") {
-                                hookCount += 1; break
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        hooksInstalled = (hookCount >= 6)
-    }
+    let claudeHookStatus = readHookStatus(
+        kClaudeSettings,
+        expectedEvents: ["PreToolUse", "PostToolUse", "Notification", "Stop", "PermissionRequest", "PermissionDenied"]
+    )
+    let codexHookStatus = readHookStatus(
+        kCodexHooks,
+        expectedEvents: ["PreToolUse", "PostToolUse", "Stop", "PermissionRequest"]
+    )
 
     // --- Task ---
     var taskName: String? = nil
@@ -260,11 +403,11 @@ func readAppStatus() -> AppStatus {
     let overall: OverallStatus
     if !barkOk {
         overall = .noBark
-    } else if !hooksInstalled {
+    } else if !claudeHookStatus.installed && !codexHookStatus.installed {
         overall = .hooksMissing
     } else if hasRecentRisk {
         overall = .recentRisk
-    } else if !barkOk && !hooksInstalled {
+    } else if !barkOk && !claudeHookStatus.installed && !codexHookStatus.installed {
         overall = .needsSetup
     } else {
         overall = .ready
@@ -273,8 +416,10 @@ func readAppStatus() -> AppStatus {
     return AppStatus(
         barkOk: barkOk,
         barkDisplay: barkDisplay,
-        hooksInstalled: hooksInstalled,
-        hookCount: hookCount,
+        claudeHooksInstalled: claudeHookStatus.installed,
+        claudeHookCount: claudeHookStatus.count,
+        codexHooksInstalled: codexHookStatus.installed,
+        codexHookCount: codexHookStatus.count,
         taskName: taskName,
         allowedPaths: allowedPaths,
         forbiddenPaths: forbiddenPaths,
@@ -290,7 +435,6 @@ func readAppStatus() -> AppStatus {
 // App Delegate
 // ──────────────────────────────────────────────────────────────────────────────
 
-@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var lastActionResult: String = ""
@@ -311,35 +455,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "\(status.overall.icon) AW"
 
         // ── Header ──
-        addDisabled(menu, "AgentWatch — \(status.overall.rawValue)")
+        addDisabled(menu, "AgentWatch — \(status.overall.displayName)")
         menu.addItem(.separator())
 
         // ── Status ──
         addDisabled(menu, "Bark: \(status.barkOk ? "✓ OK" : "✗ \(status.barkDisplay)")")
-        addDisabled(menu, "Hooks: \(status.hooksInstalled ? "✓ Installed" : (status.hookCount >= 4 ? "✗ Missing PermissionRequest" : "✗ Missing"))")
-        addDisabled(menu, "Notif Mode: \(status.notificationMode)")
-        addDisabled(menu, "Persona: \(personaDisplayName(status.personaTheme))")
-        addDisabled(menu, "Approval Timeout Notify: \(status.timeoutWatchNotify ? "On" : "Off")")
+        addDisabled(menu, "Claude Hooks: \(hookStatusText(installed: status.claudeHooksInstalled, count: status.claudeHookCount, expected: 6))")
+        addDisabled(menu, "Codex Hooks: \(hookStatusText(installed: status.codexHooksInstalled, count: status.codexHookCount, expected: 4))")
+        addDisabled(menu, "\(localized("Notif Mode", "通知模式")): \(notificationModeDisplayName(status.notificationMode))")
+        addDisabled(menu, "\(localized("Persona", "人格包")): \(personaDisplayName(status.personaTheme))")
+        addDisabled(menu, "\(localized("Approval Timeout Notify", "审批超时推送")): \(status.timeoutWatchNotify ? localized("On", "开") : localized("Off", "关"))")
         if let task = status.taskName {
-            addDisabled(menu, "Task: \(task)")
+            addDisabled(menu, "\(localized("Task", "任务")): \(task)")
             let allowed = status.allowedPaths.prefix(4).joined(separator: ", ")
             let forbidden = status.forbiddenPaths.prefix(4).joined(separator: ", ")
-            if !allowed.isEmpty { addDisabled(menu, "  Allowed: \(allowed)") }
-            if !forbidden.isEmpty { addDisabled(menu, "  Forbidden: \(forbidden)") }
+            if !allowed.isEmpty { addDisabled(menu, "  \(localized("Allowed", "允许")): \(allowed)") }
+            if !forbidden.isEmpty { addDisabled(menu, "  \(localized("Forbidden", "禁止")): \(forbidden)") }
         } else {
-            addDisabled(menu, "Task: (none)")
+            addDisabled(menu, "\(localized("Task", "任务")): \(localized("(none)", "(无)"))")
         }
 
         menu.addItem(.separator())
 
         // ── Recent Events ──
-        addDisabled(menu, "Recent Events:")
+        addDisabled(menu, "\(localized("Recent Events", "最近事件")):")
         if status.recentEvents.isEmpty {
-            addDisabled(menu, "  (no events yet)")
+            addDisabled(menu, "  \(localized("(no events yet)", "(暂无事件)"))")
         } else {
             for ev in status.recentEvents {
                 let icon = eventIcon(ev.eventType)
-                let tag = ev.notified ? "notified" : "logged"
+                let tag = ev.notified ? localized("notified", "已推送") : localized("logged", "已记录")
                 let line = "\(icon) [\(ev.time)] \(ev.title) | \(tag)"
                 addDisabled(menu, "  \(line)")
             }
@@ -348,10 +493,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // ── Persona Theme ──
-        let personaMenu = NSMenuItem(title: "Persona Theme", action: nil, keyEquivalent: "")
-        let personaSubmenu = NSMenu(title: "Persona Theme")
+        let personaMenu = NSMenuItem(title: localized("Persona Theme", "人格包主题"), action: nil, keyEquivalent: "")
+        let personaSubmenu = NSMenu(title: localized("Persona Theme", "人格包主题"))
         let themes: [(String, String)] = [
-            ("off", "Off"), ("boss", "总裁版"), ("heir_male", "少爷版"),
+            ("off", localized("Off", "关闭")), ("boss", "总裁版"), ("heir_male", "少爷版"),
             ("heir_female", "大小姐版"), ("emperor", "皇上版"), ("palace", "甄嬛版"),
         ]
         let currentTheme = status.personaTheme
@@ -366,21 +511,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(personaMenu)
         menu.addItem(.separator())
 
+        // ── Language ──
+        let languageMenu = NSMenuItem(title: localized("Language", "语言"), action: nil, keyEquivalent: "")
+        let languageSubmenu = NSMenu(title: localized("Language", "语言"))
+        for language in AppLanguage.allCases {
+            let item = NSMenuItem(title: language.displayName, action: #selector(selectLanguage(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = language.rawValue
+            item.state = (language == AppLanguage.current) ? .on : .off
+            languageSubmenu.addItem(item)
+        }
+        languageMenu.submenu = languageSubmenu
+        menu.addItem(languageMenu)
+        menu.addItem(.separator())
+
         // ── Actions ──
-        addAction(menu, "Refresh Status",          #selector(refreshStatus))
-        addAction(menu, "Add / Update Bark Key...", #selector(updateBarkKey))
-        addAction(menu, "Show Bark Config",         #selector(showBarkConfig))
-        addAction(menu, "Test Push",               #selector(testPush))
-        addAction(menu, "Set Task Boundary...",    #selector(setTaskBoundary))
-        addAction(menu, "Clear Task Boundary",     #selector(clearTaskBoundary))
+        addAction(menu, localized("Refresh Status", "刷新状态"),               #selector(refreshStatus))
+        addAction(menu, localized("Add / Update Bark Key...", "添加 / 更新 Bark Key..."), #selector(updateBarkKey))
+        addAction(menu, localized("Show Bark Config", "查看 Bark 配置"),         #selector(showBarkConfig))
+        addAction(menu, localized("Test Push", "测试推送"),                    #selector(testPush))
+        addAction(menu, localized("Set Task Boundary...", "设置任务边界..."),    #selector(setTaskBoundary))
+        addAction(menu, localized("Clear Task Boundary", "清除任务边界"),       #selector(clearTaskBoundary))
+        addAction(menu, localized("Install / Update Claude Code Hooks", "安装 / 更新 Claude Code Hooks"), #selector(installClaudeHooks))
+        addAction(menu, localized("Install / Update Codex Hooks", "安装 / 更新 Codex Hooks"), #selector(installCodexHooks))
 
         menu.addItem(.separator())
 
-        addAction(menu, "Open Monitor in Terminal", #selector(openMonitor))
-        addAction(menu, "Open Logs Folder",         #selector(openLogsFolder))
-        addAction(menu, "Open README",              #selector(openReadme))
-        addAction(menu, "Open config.json",         #selector(openConfig))
-        addAction(menu, "Copy Setup Commands",      #selector(copySetupCommands))
+        addAction(menu, localized("Open Monitor in Terminal", "在终端打开监视器"), #selector(openMonitor))
+        addAction(menu, localized("Open Logs Folder", "打开日志文件夹"),          #selector(openLogsFolder))
+        addAction(menu, localized("Open README", "打开 README"),                #selector(openReadme))
+        addAction(menu, localized("Open config.json", "打开 config.json"),       #selector(openConfig))
+        addAction(menu, localized("Copy Setup Commands", "复制安装命令"),        #selector(copySetupCommands))
 
         menu.addItem(.separator())
 
@@ -390,7 +551,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(.separator())
         }
 
-        addAction(menu, "Quit", #selector(quitApp))
+        addAction(menu, localized("Quit", "退出"), #selector(quitApp))
 
         statusItem.menu = menu
     }
@@ -409,9 +570,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item)
     }
 
-    @MainActor private func refreshUI(with result: String? = nil) {
+    private func refreshUI(with result: String? = nil) {
         if let r = result { lastActionResult = r }
         rebuildMenu()
+    }
+
+    private func notificationModeDisplayName(_ mode: String) -> String {
+        switch mode {
+        case "actionable": return localized("actionable", "只推送需处理事件")
+        case "verbose":    return localized("verbose", "全部事件")
+        default:           return mode
+        }
+    }
+
+    private func hookStatusText(installed: Bool, count: Int, expected: Int) -> String {
+        if installed {
+            return "✓ \(localized("Installed", "已安装"))"
+        }
+        if count <= 0 {
+            return "✗ \(localized("Missing", "缺失"))"
+        }
+        return "✗ \(localized("Partial", "部分安装")) (\(count)/\(expected))"
     }
 
     private func eventIcon(_ type: String) -> String {
@@ -432,7 +611,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func personaDisplayName(_ theme: String) -> String {
         switch theme {
-        case "off":         return "Off"
+        case "off":         return localized("Off", "关闭")
         case "boss":        return "总裁版"
         case "heir_male":   return "少爷版"
         case "heir_female": return "大小姐版"
@@ -442,10 +621,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let language = AppLanguage(rawValue: raw) else { return }
+        AppLanguage.current = language
+        lastActionResult = localized("Language updated.", "语言已切换。")
+        rebuildMenu()
+    }
+
     @objc private func selectPersonaTheme(_ sender: NSMenuItem) {
         guard let theme = sender.representedObject as? String else { return }
         let name = personaDisplayName(theme)
-        lastActionResult = "Setting persona: \(name)..."
+        lastActionResult = localized("Setting persona", "正在设置人格包") + ": \(name)..."
         rebuildMenu()
         DispatchQueue.global().async { [weak self] in
             let args: [String]
@@ -457,10 +644,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let result = callAgentWatch(args, timeoutSec: 10.0)
             DispatchQueue.main.async {
                 let ok = (result?.exitCode == 0)
-                let msg = ok ? "Persona theme updated: \(name)" : "Persona update failed."
+                let msg = ok
+                    ? localized("Persona theme updated", "人格包主题已更新") + ": \(name)"
+                    : localized("Persona update failed.", "人格包更新失败。")
                 if ok {
                     // Brief feedback via last result; full status already refreshed below.
-                    self?.showInfoDialog("Persona Theme Updated", message: msg)
+                    self?.showInfoDialog(localized("Persona Theme Updated", "人格包主题已更新"), message: msg)
                 }
                 self?.refreshUI(with: msg)
             }
@@ -479,13 +668,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func testPush() {
-        lastActionResult = "Testing push..."
+        lastActionResult = localized("Testing push...", "正在测试推送...")
         rebuildMenu()
         DispatchQueue.global().async { [weak self] in
             let result = callAgentWatch(["test-push"], timeoutSec: 20.0)
             DispatchQueue.main.async {
                 let ok = (result?.exitCode == 0)
-                self?.refreshUI(with: ok ? "Last: Test push sent ✓" : "Last: Test push failed ✗")
+                self?.refreshUI(with: ok
+                    ? localized("Last: Test push sent ✓", "上次操作：测试推送已发送 ✓")
+                    : localized("Last: Test push failed ✗", "上次操作：测试推送失败 ✗"))
             }
         }
     }
@@ -506,9 +697,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global().async { [weak self] in
             _ = callAgentWatch(["task", "clear"], timeoutSec: 5.0)
             DispatchQueue.main.async {
-                self?.refreshUI(with: "Task boundary cleared.")
+                self?.refreshUI(with: localized("Task boundary cleared.", "任务边界已清除。"))
             }
         }
+    }
+
+    @objc private func installClaudeHooks() {
+        guard confirmHookInstall(
+            title: localized("Install Claude Code Hooks", "安装 Claude Code Hooks"),
+            message: localized(
+                "This will install AgentWatch hooks into your Claude Code settings. A backup is created first.",
+                "这会把 AgentWatch hooks 写入 Claude Code 配置，并会先创建备份。"
+            )
+        ) else { return }
+        let script = """
+        cd '\(kProjectPath)' && bash install_claude_hooks.sh
+        """
+        runTerminalScript(script)
+        refreshUI(with: localized("Claude hooks installer launched.", "Claude hooks 安装器已启动。"))
+    }
+
+    @objc private func installCodexHooks() {
+        guard confirmHookInstall(
+            title: localized("Install Codex Hooks", "安装 Codex Hooks"),
+            message: localized(
+                "This will install AgentWatch hooks into your Codex hooks.json. A backup is created first.",
+                "这会把 AgentWatch hooks 写入 Codex hooks.json，并会先创建备份。"
+            )
+        ) else { return }
+        let script = """
+        cd '\(kProjectPath)' && bash install_codex_hooks.sh
+        """
+        runTerminalScript(script)
+        refreshUI(with: localized("Codex hooks installer launched.", "Codex hooks 安装器已启动。"))
     }
 
     @objc private func openMonitor() {
@@ -538,19 +759,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pip install -e .
         agentwatch init
         agentwatch test-push
+        bash install_claude_hooks.sh
+        bash install_codex_hooks.sh
         """
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(cmds, forType: .string)
-        refreshUI(with: "Setup commands copied to clipboard.")
+        refreshUI(with: localized("Setup commands copied to clipboard.", "安装命令已复制到剪贴板。"))
     }
 
     @objc private func updateBarkKey() {
         let alert = NSAlert()
-        alert.messageText = "Configure Bark Key"
-        alert.informativeText = "Paste your Bark URL or Bark Key.\n\nExamples:\n  https://api.day.app/YOUR_KEY/\n  YOUR_KEY"
+        alert.messageText = localized("Configure Bark Key", "配置 Bark Key")
+        alert.informativeText = localized(
+            "Paste your Bark URL or Bark Key.\n\nExamples:\n  https://api.day.app/YOUR_KEY/\n  YOUR_KEY",
+            "粘贴你的 Bark URL 或 Bark Key。\n\n示例：\n  https://api.day.app/YOUR_KEY/\n  YOUR_KEY"
+        )
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: localized("Save", "保存"))
+        alert.addButton(withTitle: localized("Cancel", "取消"))
 
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         textField.placeholderString = "https://api.day.app/... or key"
@@ -564,7 +790,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let input = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if input.isEmpty { return }
 
-        lastActionResult = "Updating Bark key..."
+        lastActionResult = localized("Updating Bark key...", "正在更新 Bark Key...")
         rebuildMenu()
 
         DispatchQueue.global().async { [weak self] in
@@ -575,11 +801,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Extract the redacted key from stdout for the dialog
                     let out = result?.stdout ?? ""
                     let lines = out.components(separatedBy: "\n")
-                    let keyLine = lines.first(where: { $0.contains("key updated") }) ?? "Bark key updated."
-                    self?.showInfoDialog("Bark Key Updated", message: keyLine.trimmingCharacters(in: .whitespaces))
+                    let keyLine = lines.first(where: { $0.lowercased().contains("key updated") }) ?? localized("Bark key updated.", "Bark Key 已更新。")
+                    self?.showInfoDialog(localized("Bark Key Updated", "Bark Key 已更新"), message: keyLine.trimmingCharacters(in: .whitespaces))
                 } else {
-                    let err = result?.stderr ?? result?.stdout ?? "Unknown error"
-                    self?.showInfoDialog("Error", message: err.trimmingCharacters(in: .whitespaces))
+                    let err = result?.stderr ?? result?.stdout ?? localized("Unknown error", "未知错误")
+                    self?.showInfoDialog(localized("Error", "错误"), message: err.trimmingCharacters(in: .whitespaces))
                 }
                 self?.refreshUI()
             }
@@ -590,11 +816,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let status = readAppStatus()
         let server = (readJSON(kConfigPath)?["notifier"] as? [String: Any])?["bark_server"] as? String ?? "https://api.day.app"
         let message = """
-        Bark:  \(status.barkOk ? "OK" : "Missing")
-        Server: \(server)
-        Key:   \(status.barkDisplay)
+        Bark:  \(status.barkOk ? "OK" : localized("Missing", "缺失"))
+        \(localized("Server", "服务器")): \(server)
+        \(localized("Key", "Key")):   \(status.barkDisplay)
         """
-        showInfoDialog("Bark Configuration", message: message)
+        showInfoDialog(localized("Bark Configuration", "Bark 配置"), message: message)
     }
 
     private func showInfoDialog(_ title: String, message: String) {
@@ -602,8 +828,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: localized("OK", "确定"))
         alert.runModal()
+    }
+
+    private func confirmHookInstall(title: String, message: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: localized("Continue", "继续"))
+        alert.addButton(withTitle: localized("Cancel", "取消"))
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     @objc private func quitApp() {

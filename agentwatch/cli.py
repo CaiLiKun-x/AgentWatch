@@ -61,6 +61,9 @@ from agentwatch.utils import read_stdin_json, timestamp_iso, mask_key, parse_bar
 # ---------------------------------------------------------------------------
 
 _CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+_CODEX_HOOKS = Path.home() / ".codex" / "hooks.json"
+_CLAUDE_HOOK_EVENTS = ["PreToolUse", "PostToolUse", "Notification", "Stop", "PermissionRequest", "PermissionDenied"]
+_CODEX_HOOK_EVENTS = ["PreToolUse", "PostToolUse", "Stop", "PermissionRequest"]
 
 
 def _print_json(obj: Any) -> None:
@@ -89,6 +92,14 @@ def _risk_color(risk: str) -> str:
     return mapping.get(risk, _ansi("reset"))
 
 
+def _provider_label(provider: str) -> str:
+    if provider == "codex":
+        return "Codex"
+    if provider == "claude":
+        return "Claude Code"
+    return "Agent"
+
+
 # ---------------------------------------------------------------------------
 # subcommands — existing
 # ---------------------------------------------------------------------------
@@ -101,7 +112,7 @@ def cmd_init() -> None:
     print("[AgentWatch] Init complete. Next steps:")
     print("  1. Edit config.json → set notifier.bark_key")
     print("  2. Run 'agentwatch test-push' to verify notifications")
-    print("  3. Run 'bash install_claude_hooks.sh' to wire up Claude Code hooks")
+    print("  3. Run 'bash install_claude_hooks.sh' or 'bash install_codex_hooks.sh' to wire up hooks")
 
 
 def cmd_test_push() -> None:
@@ -120,12 +131,12 @@ def cmd_test_push() -> None:
         raise SystemExit(1)
 
 
-def cmd_hook(event_name: str) -> None:
-    """Claude Code hook entry point.
+def cmd_hook(event_name: str, provider: str = "auto") -> None:
+    """Claude Code / Codex hook entry point.
 
     Reads JSON from stdin, parses / classifies / evaluates policy,
     builds a Watch message, pushes via Bark, and logs the event.
-    NEVER exits non-zero — a hook crash must not block Claude Code.
+    NEVER exits non-zero — a hook crash must not block the agent.
 
     PreToolUse: registers approval candidates and spawns delayed checker.
     PostToolUse: clears matching pending actions.
@@ -134,6 +145,12 @@ def cmd_hook(event_name: str) -> None:
         raw = read_stdin_json()
         parsed = parse_event(raw, event_name)
         category = classify(parsed)
+        source_provider = provider
+        if source_provider == "auto":
+            source_provider = "codex" if isinstance(raw, dict) and "hook_event_name" in raw else "claude"
+        agent_label = _provider_label(source_provider)
+        parsed["source_provider"] = source_provider
+        parsed["agent_label"] = agent_label
 
         config = load_config()
         risk_policy = get_risk_policy(config)
@@ -222,12 +239,15 @@ def cmd_hook(event_name: str) -> None:
         elif event_name == "PermissionRequest":
             final_type = "permission_required"
             source = "hook_permission_request"
-            print(f"[AgentWatch] PermissionRequest received — pushing notification.", flush=True)
+            tool_summary = extract_tool_summary(parsed)
+            if tool_summary and tool_summary != "Unknown":
+                extra_summary = tool_summary
+            print(f"[AgentWatch] PermissionRequest received from {agent_label} — pushing notification.", flush=True)
 
         elif event_name == "PermissionDenied":
             final_type = "permission_denied"
             source = "hook_permission_denied"
-            print(f"[AgentWatch] PermissionDenied received — logging only.", flush=True)
+            print(f"[AgentWatch] PermissionDenied received from {agent_label} — logging only.", flush=True)
 
         elif category in ("permission_required", "attention_required"):
             final_type = category
@@ -255,6 +275,7 @@ def cmd_hook(event_name: str) -> None:
             "notified": notified,
             "notification_mode": notification_mode,
             "source": source,
+            "source_provider": source_provider,
             "persona_theme": (config.get("persona", {}) or {}).get("theme", "off") if (config.get("persona", {}) or {}).get("enabled") else "off",
             "raw_event": raw or {},
         }
@@ -355,7 +376,7 @@ def cmd_task_quick() -> None:
 
     # Defaults
     default_allowed = "tmp_agent_task,figures,results,scripts"
-    default_forbidden = ".env,.git,config.json,agentwatch,pyproject.toml,README.md,install_claude_hooks.sh,uninstall_claude_hooks.sh"
+    default_forbidden = ".env,.git,config.json,agentwatch,pyproject.toml,README.md,install_claude_hooks.sh,uninstall_claude_hooks.sh,install_codex_hooks.sh,uninstall_codex_hooks.sh"
 
     try:
         allowed_raw = input(f"Allowed paths [{default_allowed}]: ").strip()
@@ -635,40 +656,68 @@ def cmd_simulate(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_hooks_readonly() -> str:
-    """Check whether agentwatch hooks are present in ~/.claude/settings.json.
+def _read_hook_status(settings_path: Path, expected_events: list[str]) -> str:
+    """Check whether AgentWatch hooks are present in a hook settings file.
 
-    Only *reads* the file — never modifies it.
+    Only reads the file; never modifies it.
     """
-    if not _CLAUDE_SETTINGS.exists():
+    if not settings_path.exists():
         return "Not detected (no settings file)"
     try:
-        with open(_CLAUDE_SETTINGS, "r", encoding="utf-8") as fh:
+        with open(settings_path, "r", encoding="utf-8") as fh:
             settings = json.load(fh)
     except Exception:
         return "Not detected (unparseable settings)"
 
     hooks = settings.get("hooks", {}) or {}
     found: list[str] = []
-    for event_name in ["PreToolUse", "PostToolUse", "Notification", "Stop", "PermissionRequest", "PermissionDenied"]:
+    for event_name in expected_events:
         groups = hooks.get(event_name, [])
+        if not isinstance(groups, list):
+            continue
         for g in groups:
             inner = g.get("hooks", []) if isinstance(g, dict) else []
             for h in inner:
-                if isinstance(h, dict) and "agentwatch" in h.get("command", ""):
+                if not isinstance(h, dict):
+                    continue
+                command = f"{h.get('command', '')} {h.get('commandWindows', '')}".lower()
+                if "agentwatch" in command:
                     found.append(event_name)
                     break
             else:
                 continue
             break
 
-    if len(found) >= 6:
+    if len(found) >= len(expected_events):
         return "Installed"
-    if len(found) >= 4:
-        return f"Partial (missing PermissionRequest)"
+    missing = [event_name for event_name in expected_events if event_name not in found]
+    if "PermissionRequest" in missing and len(found) >= max(1, len(expected_events) - 2):
+        return "Partial (missing PermissionRequest)"
     if found:
-        return f"Partial ({len(found)}/6)"
+        short_missing = ", ".join(missing[:2])
+        suffix = f", missing {short_missing}" if short_missing else ""
+        return f"Partial ({len(found)}/{len(expected_events)}{suffix})"
     return "Not installed"
+
+
+def _check_claude_hooks_readonly() -> str:
+    """Check whether AgentWatch Claude Code hooks are installed."""
+    return _read_hook_status(_CLAUDE_SETTINGS, _CLAUDE_HOOK_EVENTS)
+
+
+def _check_codex_hooks_readonly() -> str:
+    """Check whether AgentWatch Codex hooks are installed."""
+    return _read_hook_status(_CODEX_HOOKS, _CODEX_HOOK_EVENTS)
+
+
+def _check_hooks_readonly() -> str:
+    """Backward-compatible Claude Code hook status helper."""
+    return _check_claude_hooks_readonly()
+
+
+def _any_agent_hooks_installed() -> bool:
+    """Return true when either supported agent has a complete hook install."""
+    return _check_claude_hooks_readonly() == "Installed" or _check_codex_hooks_readonly() == "Installed"
 
 
 def cmd_doctor() -> int:
@@ -726,20 +775,18 @@ def cmd_doctor() -> int:
     else:
         print(f"  Logs:        {_ansi('yellow')}No events yet{_ansi('reset')}")
 
-    # Claude hooks (read-only check)
-    hook_status = _check_hooks_readonly()
-    if hook_status == "Installed":
-        print(f"  Claude hooks:{_ansi('green')}Installed{_ansi('reset')}")
-    elif "missing PermissionRequest" in hook_status:
-        print(f"  Claude hooks:{_ansi('yellow')}Missing PermissionRequest{_ansi('reset')}")
-        print(f"               Run install script again to add PermissionRequest/PermissionDenied hooks.")
-        issues += 1
-    elif hook_status.startswith("Partial"):
-        print(f"  Claude hooks:{_ansi('yellow')}{hook_status}{_ansi('reset')}")
-        issues += 1
-    else:
-        print(f"  Claude hooks:{_ansi('yellow')}{hook_status}{_ansi('reset')}")
-        print(f"               Run: bash install_claude_hooks.sh")
+    # Agent hooks (read-only check)
+    claude_status = _check_claude_hooks_readonly()
+    codex_status = _check_codex_hooks_readonly()
+    hooks_ok = claude_status == "Installed" or codex_status == "Installed"
+
+    claude_color = _ansi("green") if claude_status == "Installed" else _ansi("yellow")
+    codex_color = _ansi("green") if codex_status == "Installed" else _ansi("yellow")
+    print(f"  Claude hooks:{claude_color}{claude_status}{_ansi('reset')}")
+    print(f"  Codex hooks: {codex_color}{codex_status}{_ansi('reset')}")
+    if not hooks_ok:
+        print(f"               Run one of: bash install_claude_hooks.sh")
+        print(f"                       or: bash install_codex_hooks.sh")
         issues += 1
 
     # Active task
@@ -807,12 +854,14 @@ def _render_monitor(config: dict[str, Any], issues: int) -> str:
     # Status block
     nc = get_notifier_config(config)
     bark_ok = bool(nc.get("bark_key", "") and nc["bark_key"] != "YOUR_BARK_KEY")
-    hook_status = _check_hooks_readonly()
-    hooks_ok = hook_status == "Installed"
+    claude_status = _check_claude_hooks_readonly()
+    codex_status = _check_codex_hooks_readonly()
+    hooks_ok = claude_status == "Installed" or codex_status == "Installed"
 
     lines.append(f"  {b}Status:{r}")
     lines.append(f"    Bark:         {g}OK{r}" if bark_ok else f"    Bark:         {y}NOT CONFIGURED{r}")
-    lines.append(f"    Hooks:        {g}{hook_status}{r}" if hooks_ok else f"    Hooks:        {y}{hook_status}{r}")
+    lines.append(f"    Claude hooks: {g}{claude_status}{r}" if claude_status == "Installed" else f"    Claude hooks: {y}{claude_status}{r}")
+    lines.append(f"    Codex hooks:  {g}{codex_status}{r}" if codex_status == "Installed" else f"    Codex hooks:  {y}{codex_status}{r}")
 
     state = load_state()
     task = state.get("active_task")
@@ -874,7 +923,7 @@ def cmd_monitor() -> None:
             # Re-count issues each loop so status is live.
             nc = get_notifier_config(config)
             bark_ok = bool(nc.get("bark_key", "") and nc["bark_key"] != "YOUR_BARK_KEY")
-            hooks_ok = _check_hooks_readonly() == "Installed"
+            hooks_ok = _any_agent_hooks_installed()
             issues = 0 if (bark_ok and hooks_ok) else 1
 
             display = _render_monitor(config, issues)
@@ -1216,7 +1265,7 @@ def cmd_persona_test(event_type: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentwatch",
-        description="Claude Code / AI Agent status monitor with Apple Watch notifications",
+        description="Claude Code / Codex status monitor with Apple Watch notifications",
     )
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -1259,8 +1308,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_test.add_argument("event", choices=["permission", "done", "danger", "drift", "failure"])
 
     # hook
-    p_hook = sub.add_parser("hook", help="Claude Code hook entry point (called by hooks)")
+    p_hook = sub.add_parser("hook", help="Claude Code / Codex hook entry point (called by hooks)")
     p_hook.add_argument("--event", required=True, choices=["PreToolUse", "PostToolUse", "Notification", "Stop", "PermissionRequest", "PermissionDenied"])
+    p_hook.add_argument("--provider", default="auto", choices=["auto", "claude", "codex"], help="Hook source provider")
 
     # task
     p_task = sub.add_parser("task", help="Manage task boundaries")
@@ -1339,7 +1389,7 @@ def main() -> None:
         else:
             parser.parse_args(["persona", "--help"])
     elif args.command == "hook":
-        cmd_hook(args.event)
+        cmd_hook(args.event, args.provider)
     elif args.command == "task":
         if args.task_cmd == "start":
             cmd_task_start(args)

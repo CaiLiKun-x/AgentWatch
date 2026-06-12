@@ -127,7 +127,8 @@ def _body_attention(parsed: dict[str, Any] | None) -> str:
 def _body_done(parsed: dict[str, Any] | None) -> str:
     raw = parsed or {}
     stop_reason = raw.get("raw_event", {}).get("reason", "") or "当前步骤已结束"
-    return f"Claude Code 当前步骤已结束：{stop_reason}\n风险：低\n建议：回电脑验收或给下一步指示"
+    agent_label = raw.get("agent_label", "Agent")
+    return f"{agent_label} 当前步骤已结束：{stop_reason}\n风险：低\n建议：回电脑验收或给下一步指示"
 
 
 def _body_danger(danger_info: dict[str, Any] | None) -> str:

@@ -3,7 +3,7 @@
 # AgentWatch Setup.command — double-click for first-time environment setup.
 #
 # Creates .venv, installs agentwatch, runs agentwatch init, then doctor.
-# Does NOT auto-install Claude Code hooks.
+# Does NOT auto-install Claude Code or Codex hooks.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -54,8 +54,9 @@ echo ""
 echo "  2. Test notifications:"
 echo "     agentwatch test-push"
 echo ""
-echo "  3. Install Claude Code hooks (optional but recommended):"
+echo "  3. Install hooks for the agent you use (optional but recommended):"
 echo "     bash ~/Projects/agentwatch/install_claude_hooks.sh"
+echo "     bash ~/Projects/agentwatch/install_codex_hooks.sh"
 echo ""
 echo "  4. Launch the monitor:"
 echo "     Double-click AgentWatch.command"

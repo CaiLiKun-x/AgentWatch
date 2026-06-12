@@ -230,7 +230,9 @@ record EventSummary(
     string Risk, string BodyFirstLine, bool Notified, string Source);
 
 record AppStatus(
-    bool BarkOk, string BarkDisplay, bool HooksInstalled, int HookCount,
+    bool BarkOk, string BarkDisplay,
+    bool ClaudeHooksInstalled, int ClaudeHookCount,
+    bool CodexHooksInstalled, int CodexHookCount,
     string? TaskName, List<string> AllowedPaths, List<string> ForbiddenPaths,
     List<EventSummary> RecentEvents, string Overall, string NotificationMode,
     int PendingApprovals, string PersonaTheme, bool TimeoutWatchNotify,
@@ -331,40 +333,13 @@ static class StatusReader
         }
 
         // --- Hooks (read-only) ---
-        bool hooksInstalled = false;
-        int hookCount = 0;
-        var claudeSettingsPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".claude", "settings.json");
-        if (File.Exists(claudeSettingsPath))
-        {
-            try
-            {
-                var cs = JsonNode.Parse(File.ReadAllText(claudeSettingsPath))?.AsObject();
-                var hooks = cs?["hooks"]?.AsObject();
-                if (hooks != null)
-                {
-                    foreach (var evt in new[] { "PreToolUse", "PostToolUse", "Notification",
-                                                 "Stop", "PermissionRequest", "PermissionDenied" })
-                    {
-                        var arr = hooks[evt]?.AsArray();
-                        if (arr == null) continue;
-                        foreach (var g in arr)
-                        {
-                            var inner = g?["hooks"]?.AsArray();
-                            if (inner == null) continue;
-                            foreach (var h in inner)
-                            {
-                                var cmd = h?["command"]?.GetValue<string>() ?? "";
-                                if (cmd.Contains("agentwatch")) { hookCount++; break; }
-                            }
-                        }
-                    }
-                    hooksInstalled = (hookCount >= 6);
-                }
-            }
-            catch { }
-        }
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var (claudeHooksInstalled, claudeHookCount) = ReadHookStatus(
+            Path.Combine(home, ".claude", "settings.json"),
+            new[] { "PreToolUse", "PostToolUse", "Notification", "Stop", "PermissionRequest", "PermissionDenied" });
+        var (codexHooksInstalled, codexHookCount) = ReadHookStatus(
+            Path.Combine(home, ".codex", "hooks.json"),
+            new[] { "PreToolUse", "PostToolUse", "Stop", "PermissionRequest" });
 
         // --- Task ---
         string? taskName = null;
@@ -444,14 +419,53 @@ static class StatusReader
         string overall;
         if (!barkOk) overall = "No Bark Key";
         else if (!ClisVenvOk()) overall = "No .venv";
-        else if (!hooksInstalled) overall = "Hooks Missing";
+        else if (!claudeHooksInstalled && !codexHooksInstalled) overall = "Hooks Missing";
         else if (recent.Any(r => r.EventType is "danger" or "drift" or "failure")) overall = "Recent Risk";
         else overall = "Ready";
 
-        return new AppStatus(barkOk, barkDisplay, hooksInstalled, hookCount,
+        return new AppStatus(barkOk, barkDisplay,
+            claudeHooksInstalled, claudeHookCount, codexHooksInstalled, codexHookCount,
             taskName, allowed, forbidden, recent, overall, notificationMode,
             pendingCount, personaTheme, timeoutWatchNotify,
             ClisVenvOk(), ProjectPath);
+    }
+
+    private static (bool Installed, int Count) ReadHookStatus(string path, string[] expectedEvents)
+    {
+        int count = 0;
+        if (!File.Exists(path)) return (false, 0);
+        try
+        {
+            var cs = JsonNode.Parse(File.ReadAllText(path))?.AsObject();
+            var hooks = cs?["hooks"]?.AsObject();
+            if (hooks == null) return (false, 0);
+
+            foreach (var evt in expectedEvents)
+            {
+                var arr = hooks[evt]?.AsArray();
+                if (arr == null) continue;
+                bool foundForEvent = false;
+                foreach (var g in arr)
+                {
+                    var inner = g?["hooks"]?.AsArray();
+                    if (inner == null) continue;
+                    foreach (var h in inner)
+                    {
+                        var cmd = (h?["command"]?.GetValue<string>() ?? "") + " " +
+                                  (h?["commandWindows"]?.GetValue<string>() ?? "");
+                        if (cmd.Contains("agentwatch", StringComparison.OrdinalIgnoreCase))
+                        {
+                            count++;
+                            foundForEvent = true;
+                            break;
+                        }
+                    }
+                    if (foundForEvent) break;
+                }
+            }
+        }
+        catch { return (false, count); }
+        return (count >= expectedEvents.Length, count);
     }
 
     private static bool ClisVenvOk()
@@ -531,9 +545,8 @@ sealed class TrayApp : ApplicationContext
         menu.Items.Add(DisabledItem($"Project: {TruncatePath(status.ProjectRoot, 55)}"));
         menu.Items.Add(DisabledItem($"Virtual Env: {(status.VenvOk ? "OK" : "MISSING")}"));
         menu.Items.Add(DisabledItem($"Bark: {(status.BarkOk ? "OK" : status.BarkDisplay)}"));
-        var hooksText = status.HooksInstalled ? "Installed" :
-            status.HookCount >= 4 ? "Missing PermissionRequest" : "Missing";
-        menu.Items.Add(DisabledItem($"Hooks: {hooksText}"));
+        menu.Items.Add(DisabledItem($"Claude Hooks: {HookStatusText(status.ClaudeHooksInstalled, status.ClaudeHookCount, 6)}"));
+        menu.Items.Add(DisabledItem($"Codex Hooks: {HookStatusText(status.CodexHooksInstalled, status.CodexHookCount, 4)}"));
         menu.Items.Add(DisabledItem($"Notif Mode: {status.NotificationMode}"));
         menu.Items.Add(DisabledItem($"Persona: {PersonaDisplayName(status.PersonaTheme)}"));
         menu.Items.Add(DisabledItem($"Approval Timeout Notify: {(status.TimeoutWatchNotify ? "On" : "Off")}"));
@@ -615,7 +628,8 @@ sealed class TrayApp : ApplicationContext
         menu.Items.Add(ActionItem("Preview Current Persona", (_, _) => PreviewPersona()));
 
         menu.Items.Add(ActionItem("Setup Python Environment", (_, _) => RunSetup()));
-        menu.Items.Add(ActionItem("Install / Update Claude Code Hooks", (_, _) => RunHooksInstall()));
+        menu.Items.Add(ActionItem("Install / Update Claude Code Hooks", (_, _) => RunClaudeHooksInstall()));
+        menu.Items.Add(ActionItem("Install / Update Codex Hooks", (_, _) => RunCodexHooksInstall()));
         menu.Items.Add(new ToolStripSeparator());
 
         menu.Items.Add(ActionItem("Open Monitor in PowerShell", (_, _) => OpenMonitor()));
@@ -647,6 +661,13 @@ sealed class TrayApp : ApplicationContext
     {
         if (p.Length <= max) return p;
         return "..." + p[^(max - 3)..];
+    }
+
+    private static string HookStatusText(bool installed, int count, int expected)
+    {
+        if (installed) return "Installed";
+        if (count <= 0) return "Missing";
+        return $"Partial ({count}/{expected})";
     }
 
     private void RefreshUI(string? result = null)
@@ -776,7 +797,7 @@ sealed class TrayApp : ApplicationContext
             "tmp_agent_task,figures,results,scripts");
         var forbidden = Microsoft.VisualBasic.Interaction.InputBox(
             "Forbidden paths (comma-separated):", "Set Task Boundary",
-            ".env,.git,config.json,agentwatch,pyproject.toml,README.md,install_claude_hooks.sh,uninstall_claude_hooks.sh");
+            ".env,.git,config.json,agentwatch,pyproject.toml,README.md,install_claude_hooks.sh,uninstall_claude_hooks.sh,install_codex_hooks.sh,uninstall_codex_hooks.sh");
         _lastResult = "Setting task boundary...";
         RebuildMenu();
         RunAsync(new[] { "task", "start", "--name", name, "--allow", allowed ?? "", "--forbid", forbidden ?? "" },
@@ -861,7 +882,7 @@ sealed class TrayApp : ApplicationContext
         RebuildMenu();
     }
 
-    private void RunHooksInstall()
+    private void RunClaudeHooksInstall()
     {
         var script = Path.Combine(_projectPath, "windows", "install_claude_hooks_windows.ps1");
         if (!File.Exists(script))
@@ -883,6 +904,30 @@ sealed class TrayApp : ApplicationContext
         { WorkingDirectory = _projectPath, UseShellExecute = true };
         Process.Start(psi);
         _lastResult = "Hooks installation launched in PowerShell.";
+        RebuildMenu();
+    }
+
+    private void RunCodexHooksInstall()
+    {
+        var script = Path.Combine(_projectPath, "windows", "install_codex_hooks_windows.ps1");
+        if (!File.Exists(script))
+        {
+            MessageBox.Show($"Codex hooks install script not found: {script}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        var choice = MessageBox.Show(
+            "This will install AgentWatch hooks into your Codex hooks.json.\n\n" +
+            "A backup of hooks.json will be created before any changes.\n\n" +
+            "Continue?",
+            "Install Codex Hooks", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (choice != DialogResult.Yes) return;
+
+        var psi = new ProcessStartInfo("powershell.exe",
+            $"-NoExit -ExecutionPolicy Bypass -File \"{script}\"")
+        { WorkingDirectory = _projectPath, UseShellExecute = true };
+        Process.Start(psi);
+        _lastResult = "Codex hooks installation launched in PowerShell.";
         RebuildMenu();
     }
 
@@ -929,8 +974,8 @@ sealed class TrayApp : ApplicationContext
     {
         var cmds = string.Join("\r\n",
             ":: Step 1 — Install AgentWatch",
-            "git clone https://github.com/dongxutang918-afk/agentwatch.git",
-            "cd agentwatch",
+            "git clone https://github.com/CaiLiKun-x/AgentWatch.git",
+            "cd AgentWatch",
             "",
             ":: Step 2 — Setup Python environment (or click 'Setup Python Environment' in the tray menu)",
             "powershell -ExecutionPolicy Bypass -File windows\\setup_windows.ps1",
@@ -939,8 +984,9 @@ sealed class TrayApp : ApplicationContext
             ".venv\\Scripts\\agentwatch.exe config bark",
             ".venv\\Scripts\\agentwatch.exe config test",
             "",
-            ":: Step 4 — Install hooks (or click 'Install / Update Claude Code Hooks' in the tray menu)",
-            "powershell -ExecutionPolicy Bypass -File windows\\install_claude_hooks_windows.ps1");
+            ":: Step 4 — Install hooks for the agent you use",
+            "powershell -ExecutionPolicy Bypass -File windows\\install_claude_hooks_windows.ps1",
+            "powershell -ExecutionPolicy Bypass -File windows\\install_codex_hooks_windows.ps1");
         Clipboard.SetText(cmds);
         _lastResult = "Setup commands copied to clipboard.";
         RebuildMenu();
