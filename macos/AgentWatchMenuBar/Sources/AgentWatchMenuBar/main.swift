@@ -29,6 +29,11 @@ func findProjectPath() -> String {
         return savedPath
     }
 
+    if let resourcePath = Bundle.main.resourceURL?.appendingPathComponent("AgentWatchProject").path,
+       isProjectRoot(resourcePath) {
+        return resourcePath
+    }
+
     var url = Bundle.main.bundleURL
     for _ in 0..<8 {
         let candidate = url.path
